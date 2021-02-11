@@ -22,6 +22,7 @@ const (
 	webvttBlockNameStyle          = "style"
 	webvttBlockNameText           = "text"
 	webvttTimeBoundariesSeparator = " --> "
+	webvttTimestampMap            = "X-TIMESTAMP-MAP"
 )
 
 // Vars
@@ -33,6 +34,35 @@ var (
 // parseDurationWebVTT parses a .vtt duration
 func parseDurationWebVTT(i string) (time.Duration, error) {
 	return parseDuration(i, ".", 3)
+}
+
+// https://tools.ietf.org/html/rfc8216#section-3.5
+func computeOffsetFromTimestampMap(line string) (time.Duration, error) {
+	var timeOffset time.Duration
+
+	right := strings.Split(line, "=")[1]
+	var local time.Duration
+	var mpegts int64
+	for _, split := range strings.Split(right, ",") {
+		splits := strings.SplitN(split, ":", 2)
+		switch splits[0] {
+		case "LOCAL":
+			var err error
+			local, err = parseDurationWebVTT(splits[1])
+			if err != nil {
+				return timeOffset, err
+			}
+		case "MPEGTS":
+			var err error
+			mpegts, err = strconv.ParseInt(splits[1], 10, 0)
+			if err != nil {
+				return timeOffset, err
+			}
+		}
+	}
+
+	timeOffset = time.Duration(mpegts)*time.Second/90000 - local
+	return timeOffset, nil
 }
 
 // ReadFromWebVTT parses a .vtt content
@@ -60,6 +90,8 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 	var blockName string
 	var comments []string
 	var index int
+	var timeOffset time.Duration
+
 	for scanner.Scan() {
 		// Fetch line
 		line = strings.TrimSpace(scanner.Text())
@@ -187,6 +219,18 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 
 			// Append item
 			o.Items = append(o.Items, item)
+
+		case strings.HasPrefix(line, webvttTimestampMap):
+			if len(item.Lines) > 0 {
+				err = fmt.Errorf("Found timestamp map after processing subtitle items")
+				return
+			}
+
+			timeOffset, err = computeOffsetFromTimestampMap(line)
+			if err != nil {
+				return
+			}
+
 		// Text
 		default:
 			// Switch on block name
@@ -205,6 +249,10 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 				index, _ = strconv.Atoi(line)
 			}
 		}
+	}
+
+	if timeOffset > 0 {
+		o.Add(timeOffset)
 	}
 	return
 }
